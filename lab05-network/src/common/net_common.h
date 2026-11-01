@@ -1,0 +1,95 @@
+// Формат кадра TCP: [Length: 4 байта, uint32, сетевой порядок][Payload: Length байт]
+#pragma once
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
+#include <atomic>
+#include <cstdarg>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <string>
+
+#pragma comment(lib, "Ws2_32.lib")
+
+namespace net {
+
+constexpr uint32_t kMaxMessage = 65536;
+
+enum RecvResult {
+    RECV_OK = 1,
+    RECV_CLOSED = 0, // соединение закрыто собеседником
+    RECV_ERROR = -1,   // ошибка Winsock (код в WSAGetLastError)
+    RECV_TIMEOUT = -2, // истекло время ожидания данных
+    RECV_STOPPED = -3, // запрошено завершение работы
+    RECV_BADLEN = -4 // некорректная длина в заголовке кадра
+};
+
+// ошибки
+inline std::string wsa_text(int code) {
+    char* buf = nullptr;
+    DWORD n = FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, (DWORD)code, 0, (LPSTR)&buf, 0, nullptr);
+    std::string s = (n && buf) ? std::string(buf, n) : std::string("unknown error");
+    if (buf) LocalFree(buf);
+
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+
+    return s;
+}
+
+// время
+inline double now_us() {  // QueryPerformanceCounter, микросекунды
+    static const LARGE_INTEGER freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1e6 / (double)freq.QuadPart;
+}
+
+// журнал
+inline std::mutex& log_mutex() { static std::mutex m; return m; }
+
+inline void log(const char* role, const char* fmt, ...) {
+    char msg[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    std::lock_guard<std::mutex> lk(log_mutex());
+    printf("[%02d:%02d:%02d.%03d] %s %s\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, role, msg);
+    fflush(stdout);
+}
+
+inline void log_wsa(const char* role, const char* func, int code) {
+    log(role, "ERROR func=%s WSAGetLastError=%d (%s)", func, code, wsa_text(code).c_str());
+}
+
+// аргументы командной строки
+inline const char* arg_value(int argc, char** argv, const char* name, const char* def = nullptr) {
+    for (int i = 1; i < argc - 1; ++i)
+        if (std::strcmp(argv[i], name) == 0) return argv[i + 1];
+    return def;
+}
+inline bool has_flag(int argc, char** argv, const char* name) {
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], name) == 0) return true;
+    return false;
+}
+
+
+
+} 
