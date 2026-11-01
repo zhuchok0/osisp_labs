@@ -1,27 +1,56 @@
-# build
+# ---- Сборка (MSVC / Visual Studio / CMake) ----
+build/
+out/
+Debug/
+Release/
+x64/
+x86/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
 *.exe
 *.obj
+*.o
 *.pdb
 *.ilk
 *.exp
 *.lib
-build/
-out/
-.vs/
-Debug/
-Release/
-x64/
+*.idb
+*.ipdb
+*.iobj
+*.pch
+*.tlog
+*.res
+*.aps
+*.ncb
 
-# logs
+# ---- Visual Studio ----
+.vs/
+ipch/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+*.sdf
+*.opensdf
+
+# ---- Генерируемые тестовые данные (python scripts/gen_data.py) ----
+sandbox/
+secret.txt
+
+# ---- Журналы ----
 *.log
 
-# python
+# ---- Python ----
 __pycache__/
 *.pyc
 .venv/
+venv/
 
-# OS / IDE
+# ---- ОС / другие IDE ----
 Thumbs.db
 .DS_Store
 .vscode/
 .idea/
+
+# data/results.csv НЕ игнорируется: исходные данные экспериментов сдаются отдельно
