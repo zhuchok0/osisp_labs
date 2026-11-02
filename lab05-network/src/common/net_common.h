@@ -90,6 +90,34 @@ inline bool has_flag(int argc, char** argv, const char* name) {
     return false;
 }
 
+// ввод-вывод
+// Отправка всех байтов
+inline bool send_all(SOCKET s, const char* data, int len) {
+    int sent = 0;
+    while (sent < len) {
+        int n = send(s, data + sent, len - sent, 0);
+        if (n == SOCKET_ERROR) return false;
+        sent += n;
+    }
+
+    return true;
+}
+
+
+
+inline bool send_message(SOCKET s, const std::string& payload) {
+    uint32_t len = (uint32_t)payload.size();
+    std::string frame;
+    frame.resize(4 + payload.size());
+    frame[0] = (char)((len >> 24) & 0xFF);
+    frame[1] = (char)((len >> 16) & 0xFF);
+    frame[2] = (char)((len >> 8) & 0xFF);
+    frame[3] = (char)(len & 0xFF);
+    std::memcpy(&frame[4], payload.data(), payload.size());
+    return send_all(s, frame.data(), (int)frame.size());
+}
+
+
 
 
 } 
