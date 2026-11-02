@@ -117,7 +117,43 @@ inline bool send_message(SOCKET s, const std::string& payload) {
     return send_all(s, frame.data(), (int)frame.size());
 }
 
+// Прием ровно len байт Ожидание select() шаг опроса 200 мс
+inline int recv_all(SOCKET s, char* buf, int len, int idle_ms, const std::atomic<bool>* stop) {
+    const int poll_ms = 200;
+    int got = 0, idle = 0;
+    while (got < len) {
+        if (stop && stop->load()) return RECV_STOPPED;
+        fd_set rs;
+        FD_ZERO(&rs);
+        FD_SET(s, &rs);
+        timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = poll_ms * 1000;
+        int r = select(0, &rs, nullptr, nullptr, &tv);
+        if (r == SOCKET_ERROR) return RECV_ERROR;
+        if (r == 0) {
+            idle += poll_ms;
+            if (idle >= idle_ms) return RECV_TIMEOUT;
+            continue;
+        }
+        int n = recv(s, buf + got, len - got, 0);
+        if (n > 0) { got += n; idle = 0; }
+        else if (n == 0) return RECV_CLOSED;
+        else return RECV_ERROR;
+    }
+    return RECV_OK;
+}
 
+
+inline int recv_message(SOCKET s, std::string& out, int idle_ms, const std::atomic<bool>* stop) {
+    unsigned char h[4];
+    int r = recv_all(s, (char*)h, 4, idle_ms, stop);
+    if (r != RECV_OK) return r;
+    uint32_t len = ((uint32_t)h[0] << 24) | ((uint32_t)h[1] << 16) | ((uint32_t)h[2] << 8) | (uint32_t)h[3];
+    if (len == 0 || len > kMaxMessage) return RECV_BADLEN;
+    out.resize(len);
+    return recv_all(s, &out[0], (int)len, idle_ms, stop);
+}
 
 
 } 
