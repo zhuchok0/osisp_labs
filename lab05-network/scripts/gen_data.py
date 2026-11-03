@@ -1,4 +1,3 @@
-"""Генерация sandbox с SEED = 1000 + STUDENT_ID*97.  Запуск: python scripts/gen_data.py --student-id 10"""
 import argparse
 import random
 import string
@@ -10,7 +9,7 @@ ap.add_argument("--student-id", type=int, default=10)
 args = ap.parse_args()
 
 seed = 1000 + args.student_id * 97
-rng = random.Random(seed)  # фиксированный SEED -> воспроизводимое содержимое
+rng = random.Random(seed)
 print(f"STUDENT_ID={args.student_id} SEED={seed}")
 SANDBOX.mkdir(exist_ok=True)
 

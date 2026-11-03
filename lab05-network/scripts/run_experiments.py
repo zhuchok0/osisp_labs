@@ -1,5 +1,3 @@
-"""Эксперименты: 1 и 3 клиента x файлы x команды x 3 запуска -> data/results.csv, data/server.log.
-Запуск: python scripts/run_experiments.py --student-id 10 --count 20"""
 import argparse
 import subprocess
 

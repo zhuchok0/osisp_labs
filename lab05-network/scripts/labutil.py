@@ -1,4 +1,3 @@
-"""Общие функции для скриптов: поиск exe, запуск/остановка сервера, сырые TCP-кадры."""
 import socket
 import struct
 import subprocess

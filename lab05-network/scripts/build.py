@@ -1,4 +1,3 @@
-"""Сборка без CMake: MSVC (cl) или MinGW (g++). Запуск: python scripts/build.py"""
 import shutil
 import subprocess
 import sys
