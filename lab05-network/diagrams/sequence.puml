@@ -1,0 +1,65 @@
+@startuml sequence
+title Вариант 10. Удалённый интерпретатор файловых операций (TCP, протокол V1)
+
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+autonumber
+
+participant "Клиент 1\n(--id 1)" as C1
+participant "Клиент 2\n(--id 2)" as C2
+participant "Главный поток\nserver.exe" as M
+participant "Поток\nклиента 1" as T1
+participant "Поток\nклиента 2" as T2
+database "sandbox" as FS
+
+== Запуск ==
+M -> M : socket, bind, listen
+M -> M : цикл select + accept
+
+== Подключение ==
+C1 -> M : connect()
+M -> T1 : accept, ++g_active
+C2 -> M : connect()
+M -> T2 : accept, ++g_active
+
+== Успешный запрос ==
+C1 -> T1 : REQUEST [Length][V1 1 1 COUNT_LINES f.txt]
+T1 -> T1 : recv_message, parse_request
+T1 -> T1 : resolve (whitelist + canonical)
+T1 -> FS : чтение блоками
+FS --> T1 : данные
+T1 --> C1 : RESPONSE [Length][V1 1 OK 200 <server_us>\n<тело>]
+C1 -> C1 : parse_response, RTT, вывод
+
+== Параллельная работа ==
+par
+    C1 -> T1 : SIZE f_1KB.txt
+    T1 --> C1 : OK 200
+else
+    C2 -> T2 : READ_FIRST f_100KB.txt 5
+    T2 -> FS : чтение
+    FS --> T2 : данные
+    T2 --> C2 : OK 200
+end
+
+== Ошибки (любая из веток) ==
+C1 -> T1 : запрос
+alt файл не найден
+    T1 --> C1 : ERR 404
+else недопустимый путь
+    T1 --> C1 : ERR 403
+else неизвестная команда
+    T1 --> C1 : ERR 400
+else неверная длина кадра
+    T1 --> C1 : ERR 413, закрытие
+else тайм-аут (клиент или сервер)
+    T1 -> T1 : закрытие соединения
+end
+
+== Завершение ==
+C1 -> T1 : shutdown, closesocket
+T1 -> T1 : recv=0, --g_active
+M -> M : Ctrl+C -> g_stop
+T2 -> T2 : видит g_stop, закрывается
+M -> M : closesocket(listen), join всех потоков
+@enduml

@@ -1,0 +1,33 @@
+@startuml architecture
+!pragma layout smetana
+title Вариант 10. Архитектура приложения
+
+skinparam shadowing false
+skinparam componentStyle rectangle
+
+node "client.exe (отдельный процесс, 1..N экземпляров)" as CLI {
+    [Разбор аргументов,\nцикл запросов] as CMAIN
+    [connect_to(), do_request(),\nparse_response()] as CREQ
+}
+
+node "server.exe (один процесс)" as SRV {
+    [Главный поток:\nselect() + accept()] as SMAIN
+    [Поток клиента\n(по одному на соединение)] as STH
+    [parse_request(), execute(),\nкоманды LIST, SIZE, COUNT_LINES,\nREAD_FIRST, HELP] as SEXE
+    [Защита путей:\nvalid_name(), resolve()] as SSEC
+}
+
+component "net_common.h:\nsend_all, recv_all, send_message,\nrecv_message, log, now_us" as NC
+
+folder "sandbox\n(только чтение)" as SB
+
+CMAIN --> CREQ
+CREQ --> NC : кадры
+SMAIN --> STH : создаёт поток
+STH --> SEXE
+SEXE --> SSEC : проверка имени файла
+SSEC --> SB : чтение
+STH --> NC : кадры
+CREQ ..> SMAIN : TCP, 127.0.0.1:20000+STUDENT_ID
+CREQ ..> STH : REQUEST / RESPONSE
+@enduml
