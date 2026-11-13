@@ -25,6 +25,8 @@ struct ProgramSettings {
     std::string logFilePath        = "lab06.log";
 };
 
+// ======================================================================
+// Logging
 static FILE* g_logFile = nullptr;
 
 static void writeLog(const char* format, ...) {
@@ -61,6 +63,8 @@ static void reportApiError(const char* apiFunctionName, LONG errorCode, const ch
              apiFunctionName, errorCode, errorText, operationDescription);
 }
 
+// ======================================================================
+// Time measurement
 static double getElapsedMilliseconds() {
     static LARGE_INTEGER countsPerSecond = [] {
         LARGE_INTEGER frequency;
@@ -72,6 +76,91 @@ static double getElapsedMilliseconds() {
     return 1000.0 * (double)currentCounter.QuadPart / (double)countsPerSecond.QuadPart;
 }
 
+// ======================================================================
+// UTC time conversion
+static bool parseUtcTimestamp(const std::string& text, UtcTicks& resultTicks) {
+    if (text.size() != 20) return false;
+
+    int year, month, day, hour, minute, second;
+    char zoneLetter = 0;
+    if (sscanf(text.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d%c",
+               &year, &month, &day, &hour, &minute, &second, &zoneLetter) != 7 || zoneLetter != 'Z') {
+        return false;
+    }
+
+    SYSTEMTIME systemTime = {};
+    systemTime.wYear   = (WORD)year;
+    systemTime.wMonth  = (WORD)month;
+    systemTime.wDay    = (WORD)day;
+    systemTime.wHour   = (WORD)hour;
+    systemTime.wMinute = (WORD)minute;
+    systemTime.wSecond = (WORD)second;
+
+    FILETIME fileTime;
+    if (!SystemTimeToFileTime(&systemTime, &fileTime)) return false;   // also validates the ranges
+    resultTicks = ((UtcTicks)fileTime.dwHighDateTime << 32) | fileTime.dwLowDateTime;
+    return true;
+}
+
+static std::string formatUtcTimestamp(UtcTicks ticks) {
+    FILETIME fileTime;
+    fileTime.dwLowDateTime  = (DWORD)(ticks & 0xFFFFFFFFULL);
+    fileTime.dwHighDateTime = (DWORD)(ticks >> 32);
+
+    SYSTEMTIME systemTime;
+    if (!FileTimeToSystemTime(&fileTime, &systemTime)) return "invalid";
+
+    char text[64];
+    snprintf(text, sizeof text, "%04d-%02d-%02dT%02d:%02d:%02dZ",
+             systemTime.wYear, systemTime.wMonth, systemTime.wDay,
+             systemTime.wHour, systemTime.wMinute, systemTime.wSecond);
+    return text;
+}
+
+static UtcTicks getCurrentUtcTime() {
+    FILETIME fileTime;
+    GetSystemTimeAsFileTime(&fileTime);
+    return ((UtcTicks)fileTime.dwHighDateTime << 32) | fileTime.dwLowDateTime;
+}
+
+// ======================================================================
+// Configuration record
+struct ConfigRecord {
+    std::string recordId;           // identifier - registry value name
+    std::string payload;            // stored value
+    UtcTicks    createdUtc = 0;   
+    UtcTicks    expiresUtc = 0;     
+};
+
+static std::string recordToRegistryText(const ConfigRecord& record) {
+    return formatUtcTimestamp(record.createdUtc) + "|" +
+           formatUtcTimestamp(record.expiresUtc) + "|" +
+           record.payload;
+}
+
+static bool registryTextToRecord(const std::string& recordId, const std::string& registryText,
+                                 ConfigRecord& record) {
+    size_t firstSeparator = registryText.find('|');
+    if (firstSeparator == std::string::npos) return false;
+    size_t secondSeparator = registryText.find('|', firstSeparator + 1);
+    if (secondSeparator == std::string::npos) return false;
+
+    record.recordId = recordId;
+    record.payload  = registryText.substr(secondSeparator + 1);
+
+    std::string createdText = registryText.substr(0, firstSeparator);
+    std::string expiresText = registryText.substr(firstSeparator + 1, secondSeparator - firstSeparator - 1);
+    if (!parseUtcTimestamp(createdText, record.createdUtc)) return false;
+    if (!parseUtcTimestamp(expiresText, record.expiresUtc)) return false;
+    return record.expiresUtc > record.createdUtc;
+}
+
+static bool isRecordExpired(const ConfigRecord& record, UtcTicks currentTimeUtc) {
+    return record.expiresUtc <= currentTimeUtc;
+}
+
+// ======================================================================
+// Command line
 static bool parseCommandLine(int argumentCount, char** arguments, ProgramSettings& settings) {
     for (int i = 1; i < argumentCount; ++i) {
         std::string option = arguments[i];
