@@ -13,15 +13,15 @@ static const UtcTicks TICKS_PER_SECOND = 10000000ULL;
 static const UtcTicks SECONDS_PER_DAY  = 86400ULL;
 
 struct ProgramSettings {
-    int         studentId          = 47;                  
-    int         runId              = 1;                
-    int         validityDays       = 7;                  
-    int         recordCount        = 100;                   
-    unsigned    randomSeed         = 0;                      
-    std::string referenceTimeText  = "2026-03-01T00:00:00Z";
-    int         repeatCount        = 3;           
-    std::string workMode           = "selftest"; 
-    bool        dryRun             = false;                 
+    int         studentId          = 47;
+    int         runId              = 1;
+    int         validityDays       = 7;                       // record lifetime: 1, 7 or 30 
+    int         recordCount        = 100;                     // how many test records to generate
+    unsigned    randomSeed         = 0; 
+    std::string referenceTimeText  = "2026-03-01T00:00:00Z"; 
+    int         repeatCount        = 3;                       // how many times each experiment is run
+    std::string workMode           = "selftest";              // gen | list | clean | selftest | reset
+    bool        dryRun             = false;                   // true: only report
     std::string logFilePath        = "lab06.log";
 };
 
@@ -64,7 +64,7 @@ static void reportApiError(const char* apiFunctionName, LONG errorCode, const ch
 }
 
 // ======================================================================
-// Time measurement
+// Time measurement 
 static double getElapsedMilliseconds() {
     static LARGE_INTEGER countsPerSecond = [] {
         LARGE_INTEGER frequency;
@@ -97,7 +97,7 @@ static bool parseUtcTimestamp(const std::string& text, UtcTicks& resultTicks) {
     systemTime.wSecond = (WORD)second;
 
     FILETIME fileTime;
-    if (!SystemTimeToFileTime(&systemTime, &fileTime)) return false;   // also validates the ranges
+    if (!SystemTimeToFileTime(&systemTime, &fileTime)) return false; 
     resultTicks = ((UtcTicks)fileTime.dwHighDateTime << 32) | fileTime.dwLowDateTime;
     return true;
 }
@@ -110,7 +110,7 @@ static std::string formatUtcTimestamp(UtcTicks ticks) {
     SYSTEMTIME systemTime;
     if (!FileTimeToSystemTime(&fileTime, &systemTime)) return "invalid";
 
-    char text[64];
+    char text[32];
     snprintf(text, sizeof text, "%04d-%02d-%02dT%02d:%02d:%02dZ",
              systemTime.wYear, systemTime.wMonth, systemTime.wDay,
              systemTime.wHour, systemTime.wMinute, systemTime.wSecond);
@@ -126,10 +126,10 @@ static UtcTicks getCurrentUtcTime() {
 // ======================================================================
 // Configuration record
 struct ConfigRecord {
-    std::string recordId;           // identifier - registry value name
-    std::string payload;            // stored value
-    UtcTicks    createdUtc = 0;   
-    UtcTicks    expiresUtc = 0;     
+    std::string recordId;           // identifier = registry value name
+    std::string payload;            // the stored value
+    UtcTicks    createdUtc = 0;  
+    UtcTicks    expiresUtc = 0; 
 };
 
 static std::string recordToRegistryText(const ConfigRecord& record) {
@@ -209,7 +209,7 @@ static bool openLearningKey(const ProgramSettings& settings, bool createIfMissin
 
 static bool listValueNames(HKEY keyHandle, std::vector<std::string>& valueNames) {
     valueNames.clear();
-    std::vector<char> nameBuffer(16384);   // 16383 is the max value-name length
+    std::vector<char> nameBuffer(16384);   // 16383 chars is the max value-name length
 
     for (DWORD valueIndex = 0;; ++valueIndex) {
         DWORD nameLength = (DWORD)nameBuffer.size();
@@ -231,7 +231,7 @@ static bool readStringValue(HKEY keyHandle, const std::string& valueName,
     DWORD requiredBytes = 0;
     valueHasWrongType = false;
 
-    // First call: only ask for the data size
+    // First call: only ask for the data size.
     LONG status = RegQueryValueExA(keyHandle, valueName.c_str(), nullptr, &valueType, nullptr, &requiredBytes);
     if (status != ERROR_SUCCESS) {
         reportApiError("RegQueryValueExA", status, ("query size of " + valueName).c_str());
@@ -242,7 +242,7 @@ static bool readStringValue(HKEY keyHandle, const std::string& valueName,
         return false;
     }
 
-    // Second call: read the data
+    // Second call: read the data.
     std::vector<char> dataBuffer(requiredBytes + 1, 0);
     DWORD bytesRead = requiredBytes;
     status = RegQueryValueExA(keyHandle, valueName.c_str(), nullptr, &valueType,
@@ -344,15 +344,15 @@ static bool printAllRecords(const ProgramSettings& settings, UtcTicks currentTim
 }
 
 // ======================================================================
-// Cleanup of expired records
+// Cleanup of expired records (the main task of the variant)
 struct CleanupStatistics {
-    int    scannedCount       = 0;
-    int    expiredFoundCount  = 0; 
-    int    deletedCount       = 0; 
-    int    keptCount          = 0; 
-    int    badFormatCount     = 0;
-    int    errorCount         = 0;
-    double elapsedMs          = 0;  
+    int    scannedCount       = 0;   // values examined
+    int    expiredFoundCount  = 0;   // records recognised as expired
+    int    deletedCount       = 0;   // expired records actually deleted
+    int    keptCount          = 0;   // records left in the registry
+    int    badFormatCount     = 0;   // values with unparsable content
+    int    errorCount         = 0;   // failed API calls
+    double elapsedMs          = 0;   // time spent in the cleanup
 };
 
 static bool deleteExpiredRecords(const ProgramSettings& settings, UtcTicks currentTimeUtc,
@@ -419,6 +419,55 @@ static bool deleteExpiredRecords(const ProgramSettings& settings, UtcTicks curre
     return true;
 }
 
+// ======================================================================
+// Verification of the cleanup result
+static bool verifyCleanupResult(const ProgramSettings& settings, UtcTicks currentTimeUtc,
+                                const std::vector<ExpectedOutcome>& expectedOutcomes,
+                                int& expiredStillPresentCount, int& validWronglyDeletedCount) {
+    expiredStillPresentCount = 0;
+    validWronglyDeletedCount = 0;
+
+    OpenRegistryKey learningKey;
+    if (!openLearningKey(settings, false, KEY_QUERY_VALUE, learningKey)) return false;
+
+    for (const ExpectedOutcome& expected : expectedOutcomes) {
+        LONG status = RegQueryValueExA(learningKey.handle, expected.recordId.c_str(),
+                                       nullptr, nullptr, nullptr, nullptr);
+        bool recordIsPresent = (status == ERROR_SUCCESS);
+        if (!recordIsPresent && status != ERROR_FILE_NOT_FOUND) {
+            reportApiError("RegQueryValueExA", status, expected.recordId.c_str());
+            return false;
+        }
+        if (expected.shouldBeDeleted && recordIsPresent) {
+            ++expiredStillPresentCount;
+            writeLog("VERIFY id=%s expected=deleted actual=present", expected.recordId.c_str());
+        }
+        if (!expected.shouldBeDeleted && !recordIsPresent) {
+            ++validWronglyDeletedCount;
+            writeLog("VERIFY id=%s expected=kept actual=missing", expected.recordId.c_str());
+        }
+    }
+
+    std::vector<std::string> remainingValueNames;
+    if (!listValueNames(learningKey.handle, remainingValueNames)) return false;
+    for (const std::string& valueName : remainingValueNames) {
+        std::string registryText;
+        bool valueHasWrongType;
+        ConfigRecord record;
+        if (readStringValue(learningKey.handle, valueName, registryText, valueHasWrongType) &&
+            registryTextToRecord(valueName, registryText, record) &&
+            isRecordExpired(record, currentTimeUtc)) {
+            ++expiredStillPresentCount;
+            writeLog("VERIFY id=%s expired record still present", valueName.c_str());
+        }
+    }
+
+    bool allCorrect = (expiredStillPresentCount == 0 && validWronglyDeletedCount == 0);
+    writeLog("VERIFY checked=%zu expired_still_present=%d valid_wrongly_deleted=%d result=%s",
+             expectedOutcomes.size(), expiredStillPresentCount, validWronglyDeletedCount,
+             allCorrect ? "PASS" : "FAIL");
+    return true;
+}
 
 static bool deleteLearningRunKey(const ProgramSettings& settings) {
     std::string keyPath = buildLearningKeyPath(settings);
@@ -435,9 +484,6 @@ static bool deleteLearningRunKey(const ProgramSettings& settings) {
     return false;
 }
 
-
-// ======================================================================
-// Command line
 static bool parseCommandLine(int argumentCount, char** arguments, ProgramSettings& settings) {
     for (int i = 1; i < argumentCount; ++i) {
         std::string option = arguments[i];
@@ -496,12 +542,11 @@ static bool parseCommandLine(int argumentCount, char** arguments, ProgramSetting
     return true;
 }
 
-
 int main(int argumentCount, char** arguments) {
     ProgramSettings settings;
     if (!parseCommandLine(argumentCount, arguments, settings)) {
         fprintf(stderr,
-                "usage: %s --mode gen|list|clean|reset [--student N] [--run N] [--ttl 1|7|30]\n"
+                "usage: %s --mode gen|list|clean|selftest|reset [--student N] [--run N] [--ttl 1|7|30]\n"
                 "       [--count N] [--seed N] [--now ISO_UTC|system] [--repeat N] [--dry-run] [--log file]\n",
                 arguments[0]);
         return 2;
@@ -538,6 +583,53 @@ int main(int argumentCount, char** arguments) {
 
     } else if (settings.workMode == "reset") {
         exitCode = deleteLearningRunKey(settings) ? 0 : 1;
+
+    } else if (settings.workMode == "selftest") {
+        //  reset -> generate -> clean -> verify, repeated repeatCount times.
+        printf("CSV,validity_days,record_count,run_number,time_ms,expired_found,deleted,kept,errors,"
+               "expired_still_present,valid_wrongly_deleted\n");
+        double totalCleanupTimeMs = 0;
+
+        for (int runNumber = 1; runNumber <= settings.repeatCount; ++runNumber) {
+            std::vector<ExpectedOutcome> expectedOutcomes;
+            CleanupStatistics statistics;
+            int expiredStillPresentCount = 0;
+            int validWronglyDeletedCount = 0;
+
+            if (!deleteLearningRunKey(settings) ||
+                !generateTestRecords(settings, referenceTimeUtc, settings.randomSeed, expectedOutcomes) ||
+                !deleteExpiredRecords(settings, referenceTimeUtc, statistics) ||
+                !verifyCleanupResult(settings, referenceTimeUtc, expectedOutcomes,
+                                     expiredStillPresentCount, validWronglyDeletedCount)) {
+                exitCode = 1;
+                break;
+            }
+
+            int expectedDeletedCount = 0;
+            for (const ExpectedOutcome& expected : expectedOutcomes) {
+                if (expected.shouldBeDeleted) ++expectedDeletedCount;
+            }
+
+            bool runIsCorrect = (expiredStillPresentCount == 0 &&
+                                 validWronglyDeletedCount == 0 &&
+                                 statistics.deletedCount == expectedDeletedCount &&
+                                 statistics.errorCount == 0);
+            if (!runIsCorrect) exitCode = 1;
+
+            totalCleanupTimeMs += statistics.elapsedMs;
+            printf("CSV,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d\n",
+                   settings.validityDays, settings.recordCount, runNumber, statistics.elapsedMs,
+                   statistics.expiredFoundCount, statistics.deletedCount, statistics.keptCount,
+                   statistics.errorCount, expiredStillPresentCount, validWronglyDeletedCount);
+        }
+
+        if (exitCode == 0) {
+            writeLog("SELFTEST validity_days=%d avg_time_ms=%.3f result=PASS",
+                     settings.validityDays, totalCleanupTimeMs / settings.repeatCount);
+        } else {
+            writeLog("SELFTEST validity_days=%d result=FAIL", settings.validityDays);
+        }
+        deleteLearningRunKey(settings); 
 
     } else {
         fprintf(stderr, "unknown mode: %s\n", settings.workMode.c_str());
