@@ -1,0 +1,13 @@
+flowchart TD
+    A[RegOpenKeyEx: open Run_ID key] --> B[RegEnumValue: collect all value names]
+    B --> C{Next value?}
+    C -- no --> Z[Print statistics, RegCloseKey]
+    C -- yes --> D[RegQueryValueEx: read REG_SZ data]
+    D --> E{Read and parse OK?}
+    E -- no --> F[Log, keep the value]
+    F --> C
+    E -- yes --> G{expiresUtc <= now?}
+    G -- no --> H[Keep valid record]
+    H --> C
+    G -- yes --> I[RegDeleteValue: delete record]
+    I --> C
