@@ -160,6 +160,176 @@ static bool isRecordExpired(const ConfigRecord& record, UtcTicks currentTimeUtc)
 }
 
 // ======================================================================
+// Registry helpers
+static std::string buildLearningKeyPath(const ProgramSettings& settings) {
+    char path[128];
+    snprintf(path, sizeof path, "Software\\OSiSP\\Lab06\\Student_%d\\Run_%d",
+             settings.studentId, settings.runId);
+    return path;
+}
+
+struct OpenRegistryKey {
+    HKEY handle = nullptr;
+    ~OpenRegistryKey() {
+        if (handle) {
+            LONG status = RegCloseKey(handle);
+            if (status == ERROR_SUCCESS) writeLog("REG_CLOSE status=OK");
+            else reportApiError("RegCloseKey", status, "close learning key");
+        }
+    }
+};
+
+static bool openLearningKey(const ProgramSettings& settings, bool createIfMissing,
+                            REGSAM accessRights, OpenRegistryKey& openedKey) {
+    std::string keyPath = buildLearningKeyPath(settings);
+    LONG status;
+
+    if (createIfMissing) {
+        DWORD disposition = 0;
+        status = RegCreateKeyExA(HKEY_CURRENT_USER, keyPath.c_str(), 0, nullptr, 0,
+                                 accessRights, nullptr, &openedKey.handle, &disposition);
+        if (status != ERROR_SUCCESS) {
+            openedKey.handle = nullptr;
+            reportApiError("RegCreateKeyExA", status, keyPath.c_str());
+            return false;
+        }
+        writeLog("REG_CREATE key=HKCU\\%s status=OK disposition=%s", keyPath.c_str(),
+                 disposition == REG_CREATED_NEW_KEY ? "created" : "opened_existing");
+    } else {
+        status = RegOpenKeyExA(HKEY_CURRENT_USER, keyPath.c_str(), 0, accessRights, &openedKey.handle);
+        if (status != ERROR_SUCCESS) {
+            openedKey.handle = nullptr;
+            reportApiError("RegOpenKeyExA", status, keyPath.c_str());
+            return false;
+        }
+        writeLog("REG_OPEN key=HKCU\\%s status=OK", keyPath.c_str());
+    }
+    return true;
+}
+
+static bool listValueNames(HKEY keyHandle, std::vector<std::string>& valueNames) {
+    valueNames.clear();
+    std::vector<char> nameBuffer(16384);   // 16383 is the max value-name length
+
+    for (DWORD valueIndex = 0;; ++valueIndex) {
+        DWORD nameLength = (DWORD)nameBuffer.size();
+        LONG status = RegEnumValueA(keyHandle, valueIndex, nameBuffer.data(), &nameLength,
+                                    nullptr, nullptr, nullptr, nullptr);
+        if (status == ERROR_NO_MORE_ITEMS) break;
+        if (status != ERROR_SUCCESS) {
+            reportApiError("RegEnumValueA", status, "enumerate values");
+            return false;
+        }
+        valueNames.push_back(std::string(nameBuffer.data(), nameLength));
+    }
+    return true;
+}
+
+static bool readStringValue(HKEY keyHandle, const std::string& valueName,
+                            std::string& valueText, bool& valueHasWrongType) {
+    DWORD valueType = 0;
+    DWORD requiredBytes = 0;
+    valueHasWrongType = false;
+
+    // First call: only ask for the data size
+    LONG status = RegQueryValueExA(keyHandle, valueName.c_str(), nullptr, &valueType, nullptr, &requiredBytes);
+    if (status != ERROR_SUCCESS) {
+        reportApiError("RegQueryValueExA", status, ("query size of " + valueName).c_str());
+        return false;
+    }
+    if (valueType != REG_SZ) {
+        valueHasWrongType = true;
+        return false;
+    }
+
+    // Second call: read the data
+    std::vector<char> dataBuffer(requiredBytes + 1, 0);
+    DWORD bytesRead = requiredBytes;
+    status = RegQueryValueExA(keyHandle, valueName.c_str(), nullptr, &valueType,
+                              (LPBYTE)dataBuffer.data(), &bytesRead);
+    if (status != ERROR_SUCCESS) {
+        reportApiError("RegQueryValueExA", status, ("read " + valueName).c_str());
+        return false;
+    }
+    dataBuffer[bytesRead] = 0; 
+    valueText = dataBuffer.data();
+    return true;
+}
+
+// ======================================================================
+// Test data generation
+struct ExpectedOutcome {
+    std::string recordId;
+    bool        shouldBeDeleted;   // true = record is expired
+};
+
+static unsigned nextPseudoRandom(unsigned& generatorState) {
+    generatorState = (generatorState * 1103515245u + 12345u) & 0x7FFFFFFFu;
+    return generatorState >> 8;
+}
+
+static bool generateTestRecords(const ProgramSettings& settings, UtcTicks referenceTimeUtc,
+                                unsigned randomSeed, std::vector<ExpectedOutcome>& expectedOutcomes) {
+    OpenRegistryKey learningKey;
+    if (!openLearningKey(settings, true, KEY_SET_VALUE, learningKey)) return false;
+
+    expectedOutcomes.clear();
+    unsigned generatorState = randomSeed;
+    const UtcTicks validitySeconds = (UtcTicks)settings.validityDays * SECONDS_PER_DAY;
+    int writeErrorCount = 0;
+
+    for (int recordIndex = 0; recordIndex < settings.recordCount; ++recordIndex) {
+        UtcTicks ageSeconds;   // how long ago the record was created
+        if (recordIndex == 0)      ageSeconds = validitySeconds;
+        else if (recordIndex == 1) ageSeconds = validitySeconds - 1;
+        else if (recordIndex == 2) ageSeconds = validitySeconds + 1;
+        else                       ageSeconds = (UtcTicks)nextPseudoRandom(generatorState) % (2 * validitySeconds);
+
+        char recordIdText[32];
+        snprintf(recordIdText, sizeof recordIdText, "rec_%05d", recordIndex + 1);
+
+        char payloadText[48];
+        snprintf(payloadText, sizeof payloadText, "value_%u", nextPseudoRandom(generatorState));
+
+        ConfigRecord record;
+        record.recordId   = recordIdText;
+        record.payload    = payloadText;
+        record.createdUtc = referenceTimeUtc - ageSeconds * TICKS_PER_SECOND;
+        record.expiresUtc = record.createdUtc + validitySeconds * TICKS_PER_SECOND;
+
+        std::string registryText = recordToRegistryText(record);
+        LONG status = RegSetValueExA(learningKey.handle, recordIdText, 0, REG_SZ,
+                                     (const BYTE*)registryText.c_str(), (DWORD)registryText.size() + 1);
+        if (status != ERROR_SUCCESS) {
+            reportApiError("RegSetValueExA", status, recordIdText);
+            ++writeErrorCount;
+            continue;
+        }
+        expectedOutcomes.push_back({ recordIdText, ageSeconds >= validitySeconds });
+    }
+
+    writeLog("REG_GEN count=%d validity_days=%d seed=%u errors=%d",
+             settings.recordCount, settings.validityDays, randomSeed, writeErrorCount);
+    return writeErrorCount == 0;
+}
+
+static bool deleteLearningRunKey(const ProgramSettings& settings) {
+    std::string keyPath = buildLearningKeyPath(settings);
+    LONG status = RegDeleteTreeA(HKEY_CURRENT_USER, keyPath.c_str());
+    if (status == ERROR_SUCCESS) {
+        writeLog("REG_RESET key=HKCU\\%s status=OK", keyPath.c_str());
+        return true;
+    }
+    if (status == ERROR_FILE_NOT_FOUND) {
+        writeLog("REG_RESET key=HKCU\\%s status=NOT_PRESENT", keyPath.c_str());
+        return true;
+    }
+    reportApiError("RegDeleteTreeA", status, keyPath.c_str());
+    return false;
+}
+
+
+// ======================================================================
 // Command line
 static bool parseCommandLine(int argumentCount, char** arguments, ProgramSettings& settings) {
     for (int i = 1; i < argumentCount; ++i) {
@@ -224,24 +394,42 @@ int main(int argumentCount, char** arguments) {
     ProgramSettings settings;
     if (!parseCommandLine(argumentCount, arguments, settings)) {
         fprintf(stderr,
-                "usage: %s --mode (none yet) [--student N] [--run N] [--ttl 1|7|30]\n"
+                "usage: %s --mode gen|reset [--student N] [--run N] [--ttl 1|7|30]\n"
                 "       [--count N] [--seed N] [--now ISO_UTC|system] [--repeat N] [--dry-run] [--log file]\n",
                 arguments[0]);
         return 2;
     }
     g_logFile = fopen(settings.logFilePath.c_str(), "a");
 
+    // current time
+    UtcTicks referenceTimeUtc;
+    if (settings.referenceTimeText == "system") {
+        referenceTimeUtc = getCurrentUtcTime();
+    } else if (!parseUtcTimestamp(settings.referenceTimeText, referenceTimeUtc)) {
+        fprintf(stderr, "bad --now, expected YYYY-MM-DDTHH:MM:SSZ\n");
+        return 2;
+    }
+
     if (settings.studentId > 32) {
         writeLog("WARNING student=%d is outside the 1..32 range from the assignment", settings.studentId);
     }
-    writeLog("START mode=%s student=%d run=%d validity_days=%d count=%d seed=%u",
+    writeLog("START mode=%s student=%d run=%d validity_days=%d count=%d seed=%u now=%s",
              settings.workMode.c_str(), settings.studentId, settings.runId, settings.validityDays,
-             settings.recordCount, settings.randomSeed);
+             settings.recordCount, settings.randomSeed, formatUtcTimestamp(referenceTimeUtc).c_str());
 
     int exitCode = 0;
 
-    fprintf(stderr, "unknown mode: %s\n", settings.workMode.c_str());
-    exitCode = 2;
+    if (settings.workMode == "gen") {
+        std::vector<ExpectedOutcome> expectedOutcomes;
+        exitCode = generateTestRecords(settings, referenceTimeUtc, settings.randomSeed, expectedOutcomes) ? 0 : 1;
+
+    } else if (settings.workMode == "reset") {
+        exitCode = deleteLearningRunKey(settings) ? 0 : 1;
+
+    } else {
+        fprintf(stderr, "unknown mode: %s\n", settings.workMode.c_str());
+        exitCode = 2;
+    }
 
     writeLog("END exit_code=%d", exitCode);
     if (g_logFile) fclose(g_logFile);
