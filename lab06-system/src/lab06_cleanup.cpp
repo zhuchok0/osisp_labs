@@ -313,6 +313,113 @@ static bool generateTestRecords(const ProgramSettings& settings, UtcTicks refere
     return writeErrorCount == 0;
 }
 
+// ======================================================================
+// Listing of all records with their state
+static bool printAllRecords(const ProgramSettings& settings, UtcTicks currentTimeUtc) {
+    OpenRegistryKey learningKey;
+    if (!openLearningKey(settings, false, KEY_QUERY_VALUE, learningKey)) return false;
+
+    std::vector<std::string> valueNames;
+    if (!listValueNames(learningKey.handle, valueNames)) return false;
+
+    for (const std::string& valueName : valueNames) {
+        std::string registryText;
+        bool valueHasWrongType;
+        if (!readStringValue(learningKey.handle, valueName, registryText, valueHasWrongType)) {
+            writeLog("REG_LIST id=%s status=UNREADABLE", valueName.c_str());
+            continue;
+        }
+        ConfigRecord record;
+        if (!registryTextToRecord(valueName, registryText, record)) {
+            writeLog("REG_LIST id=%s status=BAD_FORMAT", valueName.c_str());
+            continue;
+        }
+        writeLog("REG_LIST id=%s created=%s expires=%s state=%s", valueName.c_str(),
+                 formatUtcTimestamp(record.createdUtc).c_str(),
+                 formatUtcTimestamp(record.expiresUtc).c_str(),
+                 isRecordExpired(record, currentTimeUtc) ? "EXPIRED" : "VALID");
+    }
+    writeLog("REG_LIST count=%zu", valueNames.size());
+    return true;
+}
+
+// ======================================================================
+// Cleanup of expired records
+struct CleanupStatistics {
+    int    scannedCount       = 0;
+    int    expiredFoundCount  = 0; 
+    int    deletedCount       = 0; 
+    int    keptCount          = 0; 
+    int    badFormatCount     = 0;
+    int    errorCount         = 0;
+    double elapsedMs          = 0;  
+};
+
+static bool deleteExpiredRecords(const ProgramSettings& settings, UtcTicks currentTimeUtc,
+                                 CleanupStatistics& statistics) {
+    statistics = CleanupStatistics();
+
+    OpenRegistryKey learningKey;
+    if (!openLearningKey(settings, false, KEY_QUERY_VALUE | KEY_SET_VALUE, learningKey)) return false;
+
+    double startTimeMs = getElapsedMilliseconds();
+
+    std::vector<std::string> valueNames;
+    if (!listValueNames(learningKey.handle, valueNames)) return false;
+    writeLog("REG_ENUM key=Run_%d count=%zu", settings.runId, valueNames.size());
+
+    for (const std::string& valueName : valueNames) {
+        ++statistics.scannedCount;
+
+        std::string registryText;
+        bool valueHasWrongType;
+        if (!readStringValue(learningKey.handle, valueName, registryText, valueHasWrongType)) {
+            if (valueHasWrongType) writeLog("REG_SKIP id=%s reason=not_REG_SZ", valueName.c_str());
+            ++statistics.errorCount;
+            ++statistics.keptCount;            // unreadable: never delete
+            continue;
+        }
+
+        ConfigRecord record;
+        if (!registryTextToRecord(valueName, registryText, record)) {
+            writeLog("REG_SKIP id=%s reason=bad_format", valueName.c_str());
+            ++statistics.badFormatCount;
+            ++statistics.keptCount;            // malformed: never delete
+            continue;
+        }
+
+        if (!isRecordExpired(record, currentTimeUtc)) {
+            ++statistics.keptCount;            // still valid: keep
+            continue;
+        }
+
+        ++statistics.expiredFoundCount;
+        std::string expiresText = formatUtcTimestamp(record.expiresUtc);
+
+        if (settings.dryRun) {
+            writeLog("REG_DELETE id=%s expires=%s status=DRY_RUN", valueName.c_str(), expiresText.c_str());
+            continue;
+        }
+
+        LONG status = RegDeleteValueA(learningKey.handle, valueName.c_str());
+        if (status == ERROR_SUCCESS) {
+            ++statistics.deletedCount;
+            writeLog("REG_DELETE id=%s expires=%s status=OK", valueName.c_str(), expiresText.c_str());
+        } else {
+            reportApiError("RegDeleteValueA", status, valueName.c_str());
+            ++statistics.errorCount;
+            ++statistics.keptCount;            // deletion failed: record is still there
+        }
+    }
+
+    statistics.elapsedMs = getElapsedMilliseconds() - startTimeMs;
+    writeLog("REG_CLEAN scanned=%d expired=%d deleted=%d kept=%d bad_format=%d errors=%d time_ms=%.3f",
+             statistics.scannedCount, statistics.expiredFoundCount, statistics.deletedCount,
+             statistics.keptCount, statistics.badFormatCount, statistics.errorCount, statistics.elapsedMs);
+    return true;
+}
+
+
 static bool deleteLearningRunKey(const ProgramSettings& settings) {
     std::string keyPath = buildLearningKeyPath(settings);
     LONG status = RegDeleteTreeA(HKEY_CURRENT_USER, keyPath.c_str());
@@ -394,14 +501,13 @@ int main(int argumentCount, char** arguments) {
     ProgramSettings settings;
     if (!parseCommandLine(argumentCount, arguments, settings)) {
         fprintf(stderr,
-                "usage: %s --mode gen|reset [--student N] [--run N] [--ttl 1|7|30]\n"
+                "usage: %s --mode gen|list|clean|reset [--student N] [--run N] [--ttl 1|7|30]\n"
                 "       [--count N] [--seed N] [--now ISO_UTC|system] [--repeat N] [--dry-run] [--log file]\n",
                 arguments[0]);
         return 2;
     }
     g_logFile = fopen(settings.logFilePath.c_str(), "a");
 
-    // current time
     UtcTicks referenceTimeUtc;
     if (settings.referenceTimeText == "system") {
         referenceTimeUtc = getCurrentUtcTime();
@@ -422,6 +528,13 @@ int main(int argumentCount, char** arguments) {
     if (settings.workMode == "gen") {
         std::vector<ExpectedOutcome> expectedOutcomes;
         exitCode = generateTestRecords(settings, referenceTimeUtc, settings.randomSeed, expectedOutcomes) ? 0 : 1;
+
+    } else if (settings.workMode == "list") {
+        exitCode = printAllRecords(settings, referenceTimeUtc) ? 0 : 1;
+
+    } else if (settings.workMode == "clean") {
+        CleanupStatistics statistics;
+        exitCode = deleteExpiredRecords(settings, referenceTimeUtc, statistics) ? 0 : 1;
 
     } else if (settings.workMode == "reset") {
         exitCode = deleteLearningRunKey(settings) ? 0 : 1;
