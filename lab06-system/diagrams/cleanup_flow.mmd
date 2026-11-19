@@ -1,13 +1,14 @@
 flowchart TD
-    A[RegOpenKeyEx: open Run_ID key] --> B[RegEnumValue: collect all value names]
-    B --> C{Next value?}
-    C -- no --> Z[Print statistics, RegCloseKey]
-    C -- yes --> D[RegQueryValueEx: read REG_SZ data]
-    D --> E{Read and parse OK?}
-    E -- no --> F[Log, keep the value]
+    A["Открыть учебный раздел<br/>RegOpenKeyEx"] --> B["Собрать имена значений<br/>RegEnumValue"]
+    B --> C{"Есть следующее<br/>значение?"}
+    C -- нет --> Z["Итог<br/>REG_CLEAN, RegCloseKey"]
+    C -- да --> D["Прочитать данные<br/>RegQueryValueEx, REG_SZ"]
+    D --> E{"Тип REG_SZ и<br/>формат верны?"}
+    E -- нет --> F["Пропустить<br/>запись остаётся"]
     F --> C
-    E -- yes --> G{expiresUtc <= now?}
-    G -- no --> H[Keep valid record]
+    E -- да --> G{"expiresUtc ≤ T_now?"}
+    G -- нет --> H["Оставить<br/>запись действительна"]
     H --> C
-    G -- yes --> I[RegDeleteValue: delete record]
+    G -- да --> I["Удалить запись<br/>RegDeleteValue"]
     I --> C
+    style I fill:#e3f0ff,stroke:#2a78d6,stroke-width:2px
